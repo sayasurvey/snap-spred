@@ -24,7 +24,7 @@
       │  5. 画像 + 抽出プロンプトをLLMに送信
       ▼
 ┌─────────────┐
-│ llm.py       │──▶ Ollama API (/api/generate)
+│ llm.py       │──▶ Ollama API (/api/chat)
 └─────┬───────┘
       │
       │  6. JSONレスポンスをパース

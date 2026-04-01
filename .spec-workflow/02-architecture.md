@@ -74,18 +74,22 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     # GPU利用時は deploy.resources.reservations.devices を追加
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   ollama-init:
     image: ollama/ollama
     depends_on:
-      - ollama
+      ollama:
+        condition: service_healthy
     volumes:
       - ollama_data:/root/.ollama
     entrypoint: >
-      sh -c "
-        sleep 5 &&
-        ollama pull ${OLLAMA_MODEL:-qwen2.5-vl}
-      "
+      sh -c "ollama pull ${OLLAMA_MODEL:-qwen2.5-vl}"
     environment:
       - OLLAMA_HOST=http://ollama:11434
     restart: "no"
@@ -99,7 +103,8 @@ services:
     volumes:
       - ./credentials:/app/credentials:ro
     depends_on:
-      - ollama
+      ollama:
+        condition: service_healthy
 
 volumes:
   ollama_data:
