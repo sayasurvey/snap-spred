@@ -23,25 +23,42 @@ _SYSTEM_PROMPT = """あなたは優秀なデータ入力アシスタントです
 添付された画像から、ユーザーが要求する項目を正確に読み取り抽出してください。
 
 【絶対ルール】
-1. 出力は必ずJSONオブジェクトのみとすること
-2. マークダウン記法（```json 等）は使用しないこと
-3. 説明文、前置き、後書きは一切含めないこと
-4. 画像から読み取れない項目は値を null とすること
-5. 数値は文字列として出力すること（例: "380"）
-6. 日本語テキストはそのまま日本語で出力すること"""
+1. 出力は必ずJSON配列のみとすること
+2. 書類に同種の明細・品目が複数ある場合は、各項目を配列の1要素として出力すること
+3. 項目が1つのみの場合も必ず配列で返すこと（例: [{"商品名": "キャベツ"}]）
+4. マークダウン記法（```json 等）は使用しないこと
+5. 説明文、前置き、後書きは一切含めないこと
+6. 画像から読み取れない項目は値を null とすること
+7. 数値は文字列として出力すること（例: "380"）
+8. 日本語テキストはそのまま日本語で出力すること"""
 
 
-def extract_data(image_bytes: bytes, fields: list[str], model: str = None) -> dict:
+def extract_data_freeform(image_bytes: bytes, model: str = None) -> list[dict]:
     """
-    画像からフィールドを抽出してJSON辞書で返す。
+    フォーマット未指定時のフリーフォーム抽出。
+    LLMが画像から読み取れる主要な情報を自由に返す。
+
+    戻り値:
+        [{"項目名": "値", ...}, ...]
+
+    例外:
+        LLMConnectionError / LLMParseError
+    """
+    return extract_data(image_bytes, fields=[], model=model)
+
+
+def extract_data(image_bytes: bytes, fields: list[str], model: str = None) -> list[dict]:
+    """
+    画像からフィールドを抽出してJSON辞書のリストで返す。
+    1つの書類に複数の明細行がある場合は複数要素のリストになる。
 
     引数:
         image_bytes: 画像のバイナリデータ（JPEG / PNG）
-        fields: ["商品名", "価格", "生産者", ...]
+        fields: ["品名", "数量", "単価", ...]
         model: Ollamaモデル名（省略時はconfig.pyのデフォルト）
 
     戻り値:
-        {"商品名": "キャベツ", "価格": "380", ...}
+        [{"品名": "商品A", "数量": "1", ...}, {"品名": "商品B", ...}, ...]
 
     例外:
         LLMConnectionError: 接続できない・タイムアウトした場合
@@ -95,7 +112,7 @@ def extract_data(image_bytes: bytes, fields: list[str], model: str = None) -> di
             raise LLMConnectionError(f"LLMサーバーとの通信中にエラーが発生しました: {e}")
 
         content = response.json()["message"]["content"]
-        result = _extract_json(content)
+        result = _extract_json_list(content)
         if result is not None:
             return result
 
@@ -106,32 +123,70 @@ def extract_data(image_bytes: bytes, fields: list[str], model: str = None) -> di
 
 def _build_user_prompt(fields: list[str], retry: bool = False) -> str:
     """ユーザープロンプトを組み立てる"""
-    fields_text = "\n".join(f"- {f}" for f in fields)
-    example = "{" + ", ".join(f'"{f}": "値"' for f in fields) + "}"
-    retry_note = "\n※必ずJSONオブジェクトのみを返してください。説明文は不要です。" if retry else ""
+    retry_note = "\n※必ずJSON配列のみを返してください。説明文は不要です。" if retry else ""
 
-    return f"""以下の項目を画像から抽出してJSON形式で返してください。{retry_note}
+    if not fields:
+        # フリーフォームモード：LLMが項目を自由に決定
+        return f"""この画像に記載されている主要な情報をすべて抽出して、JSON配列形式で返してください。{retry_note}
+
+明細が複数行ある場合は各行を配列の1要素として出力してください。
+キー名は日本語で、画像から読み取れる実際の項目名を使用してください。
+
+【出力例（レシートの場合）】
+[{{"品名": "キャベツ", "数量": "1", "金額": "198"}}, {{"品名": "豆腐", "数量": "2", "金額": "158"}}]"""
+
+    fields_text = "\n".join(f"- {f}" for f in fields)
+    item = "{" + ", ".join(f'"{f}": "値"' for f in fields) + "}"
+    example_single = f"[{item}]"
+    example_multi = f"[{item}, {item}]"
+
+    return f"""以下の項目を画像から抽出して、JSON配列形式で返してください。{retry_note}
 
 【抽出項目】
 {fields_text}
 
-【出力例】
-{example}"""
+【出力例（明細が1件の場合）】
+{example_single}
+
+【出力例（明細が複数件の場合）】
+{example_multi}"""
 
 
-def _extract_json(text: str) -> dict | None:
-    """テキストからJSONを抽出してパースする。失敗した場合はNoneを返す"""
-    # 1. そのままパースを試みる
+def _extract_json_list(text: str) -> list[dict] | None:
+    """テキストからJSON配列または辞書を抽出し、list[dict]形式で返す。失敗した場合はNone"""
+
+    def _normalize(obj) -> list[dict] | None:
+        if isinstance(obj, list) and all(isinstance(i, dict) for i in obj):
+            return obj
+        if isinstance(obj, dict):
+            return [obj]
+        return None
+
+    # 1. そのままパース
     try:
-        return json.loads(text.strip())
+        result = _normalize(json.loads(text.strip()))
+        if result is not None:
+            return result
     except json.JSONDecodeError:
         pass
 
-    # 2. 正規表現で {} ブロックを抽出して再試行
+    # 2. [...] ブロックを抽出して再試行
+    match = re.search(r"\[.*\]", text, re.DOTALL)
+    if match:
+        try:
+            result = _normalize(json.loads(match.group()))
+            if result is not None:
+                return result
+        except json.JSONDecodeError:
+            pass
+
+    # 3. {...} ブロックを抽出して再試行（配列でない応答への対応）
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group())
+            result = _normalize(json.loads(match.group()))
+            if result is not None:
+                return result
         except json.JSONDecodeError:
             pass
 

@@ -33,6 +33,7 @@ services:
       - .env
     volumes:
       - ./credentials:/app/credentials:ro
+      - ./app:/app/app:ro
     depends_on:
       ollama:
         condition: service_healthy
