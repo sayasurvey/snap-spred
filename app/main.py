@@ -100,13 +100,32 @@ if uploaded_files:
 # ───────────────────────────────────────
 st.subheader("② 抽出フォーマットを入力（任意）")
 st.caption(
-    "例: A列: 品名, B列: 数量, C列: 単価, D列: 金額\n"
-    "明細が複数行ある場合はそれぞれ1行として登録されます。\n"
-    "※ スプレッドシートにタイトル行が設定済みの場合は空欄でも自動読み込みします"
+    "例: A列: 品名, B列: 数量, C列: 単価, D列: 金額  \n"
+    "明細が複数行ある場合はそれぞれ1行として登録されます。  \n"
+    "※ スプレッドシートにタイトル行が設定済みの場合は空欄でも自動読み込みします。"
 )
 
 if "format_text" not in st.session_state:
     st.session_state["format_text"] = ""
+
+# 列範囲ドロップダウンでテンプレートを生成
+_col_letters = [chr(65 + i) for i in range(26)]  # A〜Z
+_range_col1, _range_col2, _range_col3 = st.columns([2, 2, 3])
+with _range_col1:
+    _start_col = st.selectbox("開始列", _col_letters, index=0, key="start_col")
+with _range_col2:
+    _start_idx = _col_letters.index(_start_col)
+    _end_col = st.selectbox("終了列", _col_letters, index=_start_idx, key="end_col")
+with _range_col3:
+    st.write("")  # ラベル分の余白を合わせる
+    if st.button("テンプレートを生成", use_container_width=True):
+        _end_idx = _col_letters.index(_end_col)
+        if _end_idx >= _start_idx:
+            st.session_state["format_text"] = "\n".join(
+                f"{c}列:" for c in _col_letters[_start_idx:_end_idx + 1]
+            )
+        else:
+            st.warning("終了列は開始列以降の列を選択してください。")
 
 format_text = st.text_area(
     "フォーマット",
@@ -186,7 +205,10 @@ if run_button:
         use_format_text = ", ".join(
             f"{_idx_to_col(i)}列: {v}" for i, v in sheet_titles
         )
-        st.info(f"スプレッドシートのタイトルからフォーマットを自動検出しました: {use_format_text}")
+        detected_cols = "  \n".join(
+            f"{_idx_to_col(i)}列: {v}" for i, v in sheet_titles
+        )
+        st.info(f"スプレッドシートのタイトルからフォーマットを自動検出しました:\n\n{detected_cols}")
         try:
             format_info = parse_format(use_format_text)
         except ValueError as e:
@@ -315,7 +337,7 @@ if run_button:
         no_exif = [r for r in records if r["exif_dt"] is None]
         if no_exif:
             names = ", ".join(dict.fromkeys(r["file_name"] for r in no_exif))
-            st.warning(f"以下の画像にEXIF撮影日時がないため、末尾に配置します: {names}")
+            st.warning(f"以下の画像にEXIF撮影日時がないため、末尾に配置します:\n\n{names}")
         records.sort(key=lambda r: r["exif_dt"] or datetime.max)
 
     elif sort_order == "列の値で並び替え" and sort_col_key:
@@ -347,7 +369,7 @@ if run_button:
             if not has_sheet_titles:
                 title_row = [columns[col] for col in sorted_cols]
                 insert_title_row(title_row)
-                st.info(f"タイトル行を追加しました: {title_row}")
+                st.info("タイトル行を追加しました:\n\n" + "  \n".join(title_row))
 
             for r in records:
                 append_to_sheet(r["row_data"])
