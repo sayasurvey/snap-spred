@@ -3,23 +3,32 @@
 ## 1. システム構成図
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  Docker Compose                                      │
-│                                                      │
-│  ┌──────────────┐       ┌─────────────────────────┐ │
-│  │  Streamlit    │──────▶│  Ollama                 │ │
-│  │  (app)        │ HTTP  │  (qwen2.5-vl)           │ │
-│  │  port:8501    │◀──────│  port:11434             │ │
-│  └──────┬───────┘       └─────────────────────────┘ │
-│         │                                            │
-└─────────┼────────────────────────────────────────────┘
-          │ gspread (HTTPS)
-          ▼
-┌─────────────────────┐
-│  Google Sheets API   │
-│  (スプレッドシート)    │
-└─────────────────────┘
+[ホストOS (macOS)]
+│
+├── Ollama（ネイティブインストール, Apple Metal GPU利用）
+│     port:11434
+│
+└── Docker Compose
+      │
+      └── ┌──────────────────────────────────────────┐
+          │  app (Streamlit)                          │
+          │  port:8501                                │
+          │                                          │
+          │  HTTP (host.docker.internal:11434)        │
+          │  ──────────────────────────────▶ Ollama   │
+          │                                          │
+          │  gspread (HTTPS)                         │
+          │  ──────────────────────────────▶         │
+          └──────────────────────────────────────────┘
+                                            │
+                                            ▼
+                               ┌─────────────────────┐
+                               │  Google Sheets API   │
+                               │  (スプレッドシート)    │
+                               └─────────────────────┘
 ```
+
+> **補足**: OllamaはApple Metal GPU（M系チップ）を利用するためネイティブインストール。Dockerコンテナは`host.docker.internal`経由でホストのOllamaにアクセスする。
 
 ## 2. 技術スタック
 
@@ -27,9 +36,9 @@
 |---------|------|---------|
 | Web UI | Streamlit | Python単体でモバイル対応UIを構築可能。カメラ入力・ファイルアップロードが標準搭載 |
 | ローカルLLM | Ollama | ローカルでVisionモデルをREST API経由で手軽に実行可能 |
-| Visionモデル | qwen2.5-vl | 日本語OCR能力が高く、Ollamaで動作するVision対応モデル |
+| Visionモデル | qwen2.5vl:7b | 日本語OCR能力が高く、Ollamaで動作するVision対応7Bモデル |
 | スプレッドシート | gspread + google-auth | Python向けGoogle Sheets APIの定番ライブラリ |
-| コンテナ | Docker Compose | Ollama + Streamlitを一括管理、環境差異を排除 |
+| コンテナ | Docker Compose | Streamlitのみ管理（OllamaはネイティブでApple Metal GPU利用） |
 
 ## 3. モジュール構成
 
@@ -65,52 +74,33 @@
 
 ## 4. Docker Compose構成
 
+OllamaはApple Metal GPUを利用するためホストOS上でネイティブ実行する。Docker ComposeはStreamlitアプリのみを管理する。
+
 ```yaml
 services:
-  ollama:
-    image: ollama/ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    # GPU利用時は deploy.resources.reservations.devices を追加
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
-  ollama-init:
-    image: ollama/ollama
-    depends_on:
-      ollama:
-        condition: service_healthy
-    volumes:
-      - ollama_data:/root/.ollama
-    entrypoint: >
-      sh -c "ollama pull ${OLLAMA_MODEL:-qwen2.5-vl}"
-    environment:
-      - OLLAMA_HOST=http://ollama:11434
-    restart: "no"
-
   app:
-    build: .
+    build:
+      context: .
+      platforms:
+        - linux/arm64
     ports:
       - "8501:8501"
     env_file:
       - .env
     volumes:
       - ./credentials:/app/credentials:ro
-    depends_on:
-      ollama:
-        condition: service_healthy
-
-volumes:
-  ollama_data:
+      - ./app:/app/app:ro
+    extra_hosts:
+      # ホストマシン上のネイティブOllamaへアクセスするためのエントリ
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
 ```
 
-> **注意**: `ollama-init` サービスは初回起動時にモデルを自動でpullする。モデルのサイズは数GB程度のため、初回の `docker compose up` はダウンロード完了まで数分〜十数分かかる。`ollama_data` ボリュームにキャッシュされるため、2回目以降は不要。
+> **セットアップ手順**: Ollamaはホスト上で `brew install ollama && ollama pull qwen2.5vl:7b && ollama serve` で事前に起動しておく。Streamlitコンテナは `OLLAMA_BASE_URL=http://host.docker.internal:11434` 経由でホストのOllamaにアクセスする。
 
 ## 5. Dockerfile（Streamlitアプリ）
 

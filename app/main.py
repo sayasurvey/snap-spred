@@ -9,11 +9,27 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import streamlit as st
 from PIL import Image
 import io
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
+from app import config
 from app.parser import parse_format, build_row
 from app.llm import extract_data, extract_data_freeform, LLMConnectionError, LLMParseError
 from app.sheets import append_to_sheet, insert_title_row, get_first_row, SheetsConnectionError
+
+
+@st.cache_data(show_spinner=False)
+def _cached_extract_data(image_bytes: bytes, fields: tuple[str, ...]) -> list[dict]:
+    """LLM抽出結果をメモリキャッシュ（同一画像×同一フィールドは再計算しない）"""
+    return extract_data(image_bytes, list(fields))
+
+
+@st.cache_data(show_spinner=False)
+def _cached_extract_freeform(image_bytes: bytes) -> list[dict]:
+    """フリーフォームLLM抽出結果をメモリキャッシュ"""
+    return extract_data_freeform(image_bytes)
 
 
 def _get_exif_datetime(image_bytes: bytes) -> datetime | None:
@@ -182,45 +198,101 @@ if run_button:
         freeform_mode = True
         st.info("フォーマット未指定のため、LLMが画像から自動的に項目を抽出します。")
 
-    # ── 各画像を処理 ──
+    # ── 各画像を処理（並列） ──
     # records: {"file_name", "exif_dt", "llm_result", "row_data"} のリスト
     # 1画像に複数明細がある場合は複数レコードになる
     records: list[dict] = []
     total = len(valid_files)
     progress = st.progress(0, text="画像を解析中...")
 
-    for i, f in enumerate(valid_files):
-        progress.progress(i / total, text=f"解析中 ({i + 1}/{total}): {f.name}")
-        image_bytes = f.getvalue()
+    # ── リアルタイム経過時間タイマー ──
+    _start_time = time.time()
+    _timer_placeholder = st.empty()
+    _stop_event = threading.Event()
+
+    # メインスレッドのコンテキストをここで取得してからスレッドに渡す
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+        _main_ctx = get_script_run_ctx()
+    except Exception:
+        _main_ctx = None
+
+    def _timer_worker():
+        if _main_ctx is not None:
+            try:
+                add_script_run_ctx(threading.current_thread(), _main_ctx)
+            except Exception:
+                pass
+        while not _stop_event.is_set():
+            elapsed = time.time() - _start_time
+            mins, secs = divmod(int(elapsed), 60)
+            try:
+                _timer_placeholder.markdown(f"⏱ 経過時間: **{mins:02d}:{secs:02d}**", unsafe_allow_html=False)
+            except Exception:
+                break
+            time.sleep(0.5)
+
+    _timer_thread = threading.Thread(target=_timer_worker, daemon=True)
+    _timer_thread.start()
+
+    # ファイルの読み込みはメインスレッドで事前に行う（ファイルオブジェクトはスレッドセーフでないため）
+    file_data = [(f.name, f.getvalue()) for f in valid_files]
+
+    def _process_one(file_name: str, image_bytes: bytes) -> tuple:
+        """1枚の画像をLLMで解析して結果を返す"""
         exif_dt = _get_exif_datetime(image_bytes)
+        if freeform_mode:
+            llm_results = _cached_extract_freeform(image_bytes)
+        else:
+            llm_results = _cached_extract_data(image_bytes, tuple(llm_fields))
+        return file_name, exif_dt, llm_results
 
-        try:
-            if freeform_mode:
-                llm_results = extract_data_freeform(image_bytes)
-            else:
-                llm_results = extract_data(image_bytes, llm_fields)
-        except LLMConnectionError as e:
-            st.error(f"**{f.name}**: {e}")
-            st.stop()
-        except LLMParseError as e:
-            st.error(f"**{f.name}**: {e}")
-            st.stop()
+    completed_count = 0
+    errors: list[str] = []
 
-        for llm_result in llm_results:
-            if freeform_mode:
-                records.append({
-                    "file_name": f.name,
-                    "exif_dt": exif_dt,
-                    "llm_result": llm_result,
-                })
-            else:
-                records.append({
-                    "file_name": f.name,
-                    "exif_dt": exif_dt,
-                    "row_data": build_row(llm_result, format_info),
-                })
+    with ThreadPoolExecutor(max_workers=config.LLM_MAX_WORKERS) as executor:
+        future_to_name = {
+            executor.submit(_process_one, name, data): name
+            for name, data in file_data
+        }
+        for future in as_completed(future_to_name):
+            completed_count += 1
+            progress.progress(
+                completed_count / total,
+                text=f"解析中 ({completed_count}/{total}): {future_to_name[future]}",
+            )
+            try:
+                file_name, exif_dt, llm_results = future.result()
+                for llm_result in llm_results:
+                    if freeform_mode:
+                        records.append({
+                            "file_name": file_name,
+                            "exif_dt": exif_dt,
+                            "llm_result": llm_result,
+                        })
+                    else:
+                        records.append({
+                            "file_name": file_name,
+                            "exif_dt": exif_dt,
+                            "row_data": build_row(llm_result, format_info),
+                        })
+            except (LLMConnectionError, LLMParseError) as e:
+                errors.append(f"**{future_to_name[future]}**: {e}")
 
     progress.progress(1.0, text="解析完了")
+
+    # ── タイマー停止・最終経過時間を表示 ──
+    _stop_event.set()
+    _timer_thread.join(timeout=1)
+    _elapsed_total = time.time() - _start_time
+    _mins_total, _secs_total = divmod(int(_elapsed_total), 60)
+    _timer_placeholder.markdown(f"⏱ 解析完了: **{_mins_total:02d}:{_secs_total:02d}**")
+
+    # ── エラーがあれば表示して中断 ──
+    if errors:
+        for err in errors:
+            st.error(err)
+        st.stop()
 
     # ── フリーフォームモード: 全レコードのキーを収集して列を動的生成 ──
     if freeform_mode:

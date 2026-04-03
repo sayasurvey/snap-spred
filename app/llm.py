@@ -221,7 +221,7 @@ def _resize_image(image_bytes: bytes, max_side: int = None) -> bytes:
     w, h = img.size
     if max(w, h) > max_side:
         scale = max_side / max(w, h)
-        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        img = img.resize((int(w * scale), int(h * scale)), Image.BILINEAR)
 
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=config.IMAGE_JPEG_QUALITY)

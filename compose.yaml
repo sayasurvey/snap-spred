@@ -1,0 +1,24 @@
+services:
+  # Ollamaはネイティブインストールで実行（Apple Metal GPU利用のため）
+  # セットアップ: brew install ollama && ollama serve
+  # モデル取得: ollama pull qwen2.5-vl
+  app:
+    build:
+      context: .
+      platforms:
+        - linux/arm64
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    volumes:
+      - ./credentials:/app/credentials:ro
+      - ./app:/app/app:ro
+    extra_hosts:
+      # ホストマシン上のネイティブOllamaへアクセスするためのエントリ
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G

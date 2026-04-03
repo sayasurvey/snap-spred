@@ -82,10 +82,23 @@ def build_row(llm_result: dict, format_info: dict) -> list:
 ### llm.py
 
 ```python
-def extract_data(image_bytes: bytes, fields: list[str], model: str = None) -> dict:
+def extract_data_freeform(image_bytes: bytes, model: str = None) -> list[dict]:
     """
-    画像からフィールドを抽出してJSON辞書で返す。
-    送信前に画像を長辺1280px以内にリサイズする。
+    フォーマット未指定時のフリーフォーム抽出。
+    LLMが画像から読み取れる主要な情報を自由に返す。
+
+    戻り値:
+        [{"項目名": "値", ...}, ...]
+
+    例外:
+        LLMConnectionError / LLMParseError
+    """
+
+def extract_data(image_bytes: bytes, fields: list[str], model: str = None) -> list[dict]:
+    """
+    画像からフィールドを抽出してJSON辞書のリストで返す。
+    送信前に画像を長辺800px以内にリサイズする。
+    1つの書類に複数の明細行がある場合は複数要素のリストになる。
 
     引数:
         image_bytes: 画像のバイナリデータ（JPEG / PNG）
@@ -93,21 +106,21 @@ def extract_data(image_bytes: bytes, fields: list[str], model: str = None) -> di
         model: Ollamaモデル名（省略時はconfig.pyのデフォルト）
 
     戻り値:
-        {"商品名": "キャベツ", "価格": "380", ...}
+        [{"商品名": "キャベツ", "価格": "380", ...}, ...]
 
     例外:
-        LLMConnectionError: Ollamaに接続できない・タイムアウト（120秒）した場合
+        LLMConnectionError: Ollamaに接続できない・タイムアウト（1200秒）した場合
         LLMParseError: JSONパースが最終的に失敗した場合
     """
 
-def _resize_image(image_bytes: bytes, max_side: int = 1280) -> bytes:
+def _resize_image(image_bytes: bytes, max_side: int = 800) -> bytes:
     """
     画像を長辺max_side px以内にリサイズしてJPEGバイト列で返す。
-    長辺がmax_side以下の場合はそのまま返す。
+    長辺がmax_side以下の場合はそのまま返す。EXIF回転を考慮する。
 
     引数:
         image_bytes: 元画像のバイナリデータ
-        max_side: リサイズ上限（デフォルト1280）
+        max_side: リサイズ上限（デフォルト800）
 
     戻り値:
         リサイズ後のJPEGバイト列（品質85）
@@ -146,14 +159,16 @@ POST {OLLAMA_BASE_URL}/api/chat
 
 送信前に以下のリサイズ処理を行う:
 
-- 長辺が1280pxを超える場合、長辺=1280pxになるようアスペクト比を維持してリサイズ
+- 長辺が800pxを超える場合、長辺=800pxになるようアスペクト比を維持してリサイズ
+- EXIF回転情報を考慮してから処理する
+- RGBA・パレットモード画像はRGBに変換（JPEG非対応のため）
 - JPEG品質85でメモリ上にエンコードし、base64変換する（ディスク保存しない）
 
 ### リクエストボディ
 
 ```json
 {
-  "model": "qwen2.5-vl",
+  "model": "qwen2.5vl:7b",
   "messages": [
     {
       "role": "system",
@@ -175,7 +190,7 @@ POST {OLLAMA_BASE_URL}/api/chat
 ### HTTPタイムアウト
 
 - 接続タイムアウト: **10秒**
-- 読み取りタイムアウト: **120秒**（CPU環境での長時間推論を考慮）
+- 読み取りタイムアウト: **1200秒**（CPU環境での長時間推論を考慮）
 
 ### レスポンス（使用フィールド）
 
@@ -195,7 +210,7 @@ POST {OLLAMA_BASE_URL}/api/chat
 | エラー種別 | 対処 | ユーザーへの表示 |
 |-----------|------|-----------------|
 | Ollama未起動（接続拒否） | 接続エラー検出 | 「LLMサーバーに接続できません。Ollamaが起動しているか確認してください」 |
-| Ollama推論タイムアウト（120秒超過） | タイムアウト検出 | 「処理がタイムアウトしました。再試行するか、より軽量なモデルへの切り替えを検討してください」 |
+| Ollama推論タイムアウト（1200秒超過） | タイムアウト検出 | 「処理がタイムアウトしました。再試行するか、より軽量なモデルへの切り替えを検討してください」 |
 | LLM応答が不正JSON | 最大2回リトライ | 「データの読み取りに失敗しました。画像を変えて再試行してください」 |
 | スプレッドシート認証エラー | — | 「スプレッドシートへの認証に失敗しました。サービスアカウントの設定を確認してください」 |
 | スプレッドシート権限エラー | — | 「スプレッドシートへの書き込み権限がありません。共有設定を確認してください」 |

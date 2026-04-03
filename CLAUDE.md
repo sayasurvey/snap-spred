@@ -10,14 +10,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **言語**: Python 3.10+
 - **Web UI**: Streamlit（スマホブラウザ対応）
-- **ローカルLLM**: Ollama（qwen2.5-vl モデル）
+- **ローカルLLM**: Ollama（qwen2.5vl:7b モデル）
 - **スプレッドシート連携**: gspread + google-auth（サービスアカウント方式）
-- **コンテナ**: Docker Compose（Ollama + Streamlit を統合管理）
+- **コンテナ**: Docker Compose（Streamlitのみ管理）
+- **LLM実行環境**: Ollamaはネイティブインストール（Apple Metal GPU利用のため）
 
 ## 開発コマンド
 
 ```bash
-# 開発環境起動（Docker）
+# 【初回セットアップ】Ollamaをネイティブインストール（Apple Metal GPU利用）
+brew install ollama
+ollama pull qwen2.5vl:7b
+
+# Ollamaサーバー起動（バックグラウンド）
+ollama serve
+
+# 開発環境起動（Docker: Streamlitのみ）
 docker compose up -d
 
 # Streamlitアプリ単体起動（ローカル開発時）
@@ -25,9 +33,6 @@ streamlit run app/main.py
 
 # 依存関係インストール
 pip install -r requirements.txt
-
-# Ollamaモデルのダウンロード
-ollama pull qwen2.5-vl
 ```
 
 ## プロジェクト構成
@@ -62,8 +67,8 @@ SnapSpread/
 ```
 SPREADSHEET_ID=対象スプレッドシートのID
 GOOGLE_CREDENTIALS_PATH=credentials/service_account.json
-OLLAMA_BASE_URL=http://ollama:11434
-OLLAMA_MODEL=qwen2.5-vl
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+OLLAMA_MODEL=qwen2.5vl:7b
 ```
 
 ## 仕様書

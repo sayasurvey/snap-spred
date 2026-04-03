@@ -10,7 +10,7 @@ GOOGLE_CREDENTIALS_PATH: str = os.getenv(
     "GOOGLE_CREDENTIALS_PATH", "credentials/service_account.json"
 )
 OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5-vl")
+OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5vl:7b")
 
 # HTTPタイムアウト設定
 OLLAMA_CONNECT_TIMEOUT: int = 10   # 接続タイムアウト（秒）
@@ -22,3 +22,6 @@ IMAGE_JPEG_QUALITY: int = 85
 
 # LLMリトライ設定
 LLM_MAX_RETRIES: int = 2
+
+# 並列処理設定（OLLAMA_NUM_PARALLELと合わせること）
+LLM_MAX_WORKERS: int = int(os.getenv("LLM_MAX_WORKERS", "3"))
