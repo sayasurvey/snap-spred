@@ -13,6 +13,7 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+import psutil
 
 from app import config
 from app.parser import parse_format, build_row
@@ -21,13 +22,13 @@ from app.sheets import append_to_sheet, insert_title_row, get_first_row, SheetsC
 
 
 @st.cache_data(show_spinner=False)
-def _cached_extract_data(image_bytes: bytes, fields: tuple[str, ...]) -> list[dict]:
+def _cached_extract_data(image_bytes: bytes, fields: tuple[str, ...]) -> tuple[list[dict], dict]:
     """LLM抽出結果をメモリキャッシュ（同一画像×同一フィールドは再計算しない）"""
     return extract_data(image_bytes, list(fields))
 
 
 @st.cache_data(show_spinner=False)
-def _cached_extract_freeform(image_bytes: bytes) -> list[dict]:
+def _cached_extract_freeform(image_bytes: bytes) -> tuple[list[dict], dict]:
     """フリーフォームLLM抽出結果をメモリキャッシュ"""
     return extract_data_freeform(image_bytes)
 
@@ -227,10 +228,15 @@ if run_button:
     total = len(valid_files)
     progress = st.progress(0, text="画像を解析中...")
 
-    # ── リアルタイム経過時間タイマー ──
+    # ── リアルタイムメトリクス（経過時間・CPU・tokens/s） ──
     _start_time = time.time()
-    _timer_placeholder = st.empty()
+    _metrics_placeholder = st.empty()
     _stop_event = threading.Event()
+    _metrics_lock = threading.Lock()
+    _live_metrics = {"latest_tps": 0.0, "tps_list": []}
+
+    # CPU使用率の初回呼び出し（0を返すダミー呼び出しで初期化）
+    psutil.cpu_percent(interval=None)
 
     # メインスレッドのコンテキストをここで取得してからスレッドに渡す
     try:
@@ -248,8 +254,14 @@ if run_button:
         while not _stop_event.is_set():
             elapsed = time.time() - _start_time
             mins, secs = divmod(int(elapsed), 60)
+            cpu = psutil.cpu_percent(interval=None)
+            with _metrics_lock:
+                latest_tps = _live_metrics["latest_tps"]
             try:
-                _timer_placeholder.markdown(f"⏱ 経過時間: **{mins:02d}:{secs:02d}**", unsafe_allow_html=False)
+                tps_str = f"**{latest_tps:.1f} tok/s**" if latest_tps > 0 else "推論中..."
+                _metrics_placeholder.markdown(
+                    f"⏱ **{mins:02d}:{secs:02d}** &nbsp;|&nbsp; 💻 CPU: **{cpu:.0f}%** &nbsp;|&nbsp; ⚡ {tps_str}"
+                )
             except Exception:
                 break
             time.sleep(0.5)
@@ -264,10 +276,10 @@ if run_button:
         """1枚の画像をLLMで解析して結果を返す"""
         exif_dt = _get_exif_datetime(image_bytes)
         if freeform_mode:
-            llm_results = _cached_extract_freeform(image_bytes)
+            llm_results, metrics = _cached_extract_freeform(image_bytes)
         else:
-            llm_results = _cached_extract_data(image_bytes, tuple(llm_fields))
-        return file_name, exif_dt, llm_results
+            llm_results, metrics = _cached_extract_data(image_bytes, tuple(llm_fields))
+        return file_name, exif_dt, llm_results, metrics
 
     completed_count = 0
     errors: list[str] = []
@@ -284,7 +296,10 @@ if run_button:
                 text=f"解析中 ({completed_count}/{total}): {future_to_name[future]}",
             )
             try:
-                file_name, exif_dt, llm_results = future.result()
+                file_name, exif_dt, llm_results, metrics = future.result()
+                with _metrics_lock:
+                    _live_metrics["latest_tps"] = metrics["tokens_per_sec"]
+                    _live_metrics["tps_list"].append(metrics["tokens_per_sec"])
                 for llm_result in llm_results:
                     if freeform_mode:
                         records.append({
@@ -303,12 +318,18 @@ if run_button:
 
     progress.progress(1.0, text="解析完了")
 
-    # ── タイマー停止・最終経過時間を表示 ──
+    # ── タイマー停止・最終メトリクスを表示 ──
     _stop_event.set()
     _timer_thread.join(timeout=1)
     _elapsed_total = time.time() - _start_time
     _mins_total, _secs_total = divmod(int(_elapsed_total), 60)
-    _timer_placeholder.markdown(f"⏱ 解析完了: **{_mins_total:02d}:{_secs_total:02d}**")
+    with _metrics_lock:
+        _tps_list = _live_metrics["tps_list"]
+    _avg_tps = sum(_tps_list) / len(_tps_list) if _tps_list else 0.0
+    _tps_summary = f" &nbsp;|&nbsp; ⚡ 平均 **{_avg_tps:.1f} tok/s**" if _avg_tps > 0 else ""
+    _metrics_placeholder.markdown(
+        f"✅ 解析完了: **{_mins_total:02d}:{_secs_total:02d}**{_tps_summary}"
+    )
 
     # ── エラーがあれば表示して中断 ──
     if errors:

@@ -33,13 +33,13 @@ _SYSTEM_PROMPT = """あなたは優秀なデータ入力アシスタントです
 8. 日本語テキストはそのまま日本語で出力すること"""
 
 
-def extract_data_freeform(image_bytes: bytes, model: str = None) -> list[dict]:
+def extract_data_freeform(image_bytes: bytes, model: str = None) -> tuple[list[dict], dict]:
     """
     フォーマット未指定時のフリーフォーム抽出。
     LLMが画像から読み取れる主要な情報を自由に返す。
 
     戻り値:
-        [{"項目名": "値", ...}, ...]
+        ([{"項目名": "値", ...}, ...], {"tokens": int, "duration_s": float, "tokens_per_sec": float})
 
     例外:
         LLMConnectionError / LLMParseError
@@ -47,7 +47,7 @@ def extract_data_freeform(image_bytes: bytes, model: str = None) -> list[dict]:
     return extract_data(image_bytes, fields=[], model=model)
 
 
-def extract_data(image_bytes: bytes, fields: list[str], model: str = None) -> list[dict]:
+def extract_data(image_bytes: bytes, fields: list[str], model: str = None) -> tuple[list[dict], dict]:
     """
     画像からフィールドを抽出してJSON辞書のリストで返す。
     1つの書類に複数の明細行がある場合は複数要素のリストになる。
@@ -58,7 +58,10 @@ def extract_data(image_bytes: bytes, fields: list[str], model: str = None) -> li
         model: Ollamaモデル名（省略時はconfig.pyのデフォルト）
 
     戻り値:
-        [{"品名": "商品A", "数量": "1", ...}, {"品名": "商品B", ...}, ...]
+        (
+            [{"品名": "商品A", "数量": "1", ...}, {"品名": "商品B", ...}, ...],
+            {"tokens": int, "duration_s": float, "tokens_per_sec": float}
+        )
 
     例外:
         LLMConnectionError: 接続できない・タイムアウトした場合
@@ -111,14 +114,27 @@ def extract_data(image_bytes: bytes, fields: list[str], model: str = None) -> li
         except requests.exceptions.RequestException as e:
             raise LLMConnectionError(f"LLMサーバーとの通信中にエラーが発生しました: {e}")
 
-        content = response.json()["message"]["content"]
+        resp_json = response.json()
+        content = resp_json["message"]["content"]
         result = _extract_json_list(content)
         if result is not None:
-            return result
+            return result, _build_metrics(resp_json)
 
     raise LLMParseError(
         "データの読み取りに失敗しました。画像を変えて再試行してください。"
     )
+
+
+def _build_metrics(resp_json: dict) -> dict:
+    """Ollama レスポンスから推論メトリクスを構築する"""
+    eval_count = resp_json.get("eval_count", 0)
+    eval_duration_ns = resp_json.get("eval_duration", 0)
+    duration_s = eval_duration_ns / 1e9 if eval_duration_ns else 0
+    return {
+        "tokens": eval_count,
+        "duration_s": duration_s,
+        "tokens_per_sec": eval_count / duration_s if duration_s > 0 else 0.0,
+    }
 
 
 def _build_user_prompt(fields: list[str], retry: bool = False) -> str:
