@@ -33,6 +33,102 @@ _SYSTEM_PROMPT = """あなたは優秀なデータ入力アシスタントです
 8. 日本語テキストはそのまま日本語で出力すること"""
 
 
+def detect_document_tab(image_bytes: bytes, tab_names: list[str], model: str = None) -> str | None:
+    """
+    画像の帳票種類に最も一致するスプレッドシートのタブ名を返す。
+
+    引数:
+        image_bytes: 画像のバイナリデータ
+        tab_names: スプレッドシートのタブ名一覧
+        model: Ollamaモデル名（省略時はconfig.pyのデフォルト）
+
+    戻り値:
+        一致するタブ名（一致するものがなければNone）
+
+    例外:
+        LLMConnectionError: 接続できない・タイムアウトした場合
+    """
+    model = model or config.OLLAMA_MODEL
+    resized = _resize_image(image_bytes)
+    b64_image = base64.b64encode(resized).decode("utf-8")
+
+    tabs_json = json.dumps(tab_names, ensure_ascii=False)
+    user_prompt = f"""この画像の帳票・書類の種類に最も一致するタブ名を、以下の一覧から1つだけ選んでください。
+
+【タブ名一覧】
+{tabs_json}
+
+【出力ルール】
+- 必ず上記のタブ名の中から1つだけ選び、JSON形式で返すこと
+- 出力例: {{"tab": "レシート"}}
+- どれにも当てはまらない場合: {{"tab": null}}
+- マークダウン、説明文は一切含めないこと"""
+
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "あなたは書類分類の専門家です。指示に従いJSONのみを返してください。",
+            },
+            {
+                "role": "user",
+                "content": user_prompt,
+                "images": [b64_image],
+            },
+        ],
+        "stream": False,
+        "options": {"temperature": 0.0},
+    }
+
+    try:
+        response = requests.post(
+            f"{config.OLLAMA_BASE_URL}/api/chat",
+            json=payload,
+            timeout=(config.OLLAMA_CONNECT_TIMEOUT, config.OLLAMA_READ_TIMEOUT),
+        )
+        response.raise_for_status()
+    except requests.exceptions.ConnectionError:
+        raise LLMConnectionError(
+            "LLMサーバーに接続できません。Ollamaが起動しているか確認してください。"
+        )
+    except requests.exceptions.Timeout:
+        raise LLMConnectionError(
+            "処理がタイムアウトしました。再試行するか、より軽量なモデルへの切り替えを検討してください。"
+        )
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else None
+        raise LLMConnectionError(
+            f"LLMサーバーからエラーが返されました（HTTP {status}）: {e}"
+        )
+    except requests.exceptions.RequestException as e:
+        raise LLMConnectionError(f"LLMサーバーとの通信中にエラーが発生しました: {e}")
+
+    content = response.json()["message"]["content"]
+
+    # JSONパース
+    for pattern in [content.strip(), None]:
+        text = pattern if pattern is not None else re.search(r"\{.*\}", content, re.DOTALL)
+        if text is None:
+            break
+        raw = text if isinstance(text, str) else text.group()
+        try:
+            obj = json.loads(raw)
+            tab = obj.get("tab")
+            if tab in tab_names:
+                return tab
+            return None
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+    # 最終フォールバック: タブ名がテキスト中に含まれているか探す
+    for tab in tab_names:
+        if tab in content:
+            return tab
+
+    return None
+
+
 def extract_data_freeform(image_bytes: bytes, model: str = None) -> tuple[list[dict], dict]:
     """
     フォーマット未指定時のフリーフォーム抽出。
