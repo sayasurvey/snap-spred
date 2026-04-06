@@ -1,22 +1,26 @@
 # 03. 実装計画
 
-## フェーズ1: 環境構築（Docker + Ollama + Streamlit）
+## フェーズ1: 環境構築（Ollama ネイティブ + Docker Streamlit）
 
 ### タスク
 
-1. `Dockerfile` 作成（Python 3.10 + Streamlit）
-2. `docker-compose.yml` 作成（Ollama + ollama-init + アプリ）
-   - `ollama-init` サービスで `ollama pull ${OLLAMA_MODEL}` を自動実行するよう設定
-3. `requirements.txt` 作成
-4. `.env.example` 作成
-5. `.gitignore` 作成（credentials/、.env、__pycache__等）
-6. `docker compose up` で全サービスが起動し、モデルのダウンロードが自動開始されることを確認
-7. `docker compose logs ollama-init` でpullの進捗・完了を確認できることを確認
+1. Ollamaをホストにネイティブインストール（Apple Metal GPU利用）
+   ```bash
+   brew install ollama
+   ollama pull qwen2.5vl:7b
+   ollama serve
+   ```
+2. `Dockerfile` 作成（Python 3.10 + Streamlit, linux/arm64）
+3. `docker-compose.yml` 作成（Streamlitアプリのみ、`host.docker.internal` でOllamaへ接続）
+4. `requirements.txt` 作成
+5. `.env.example` 作成（`OLLAMA_MODEL=qwen2.5vl:7b`）
+6. `.gitignore` 作成（credentials/、.env、__pycache__等）
+7. `docker compose up -d` でStreamlitが起動し、ホストのOllamaにアクセスできることを確認
 
 ### 完了条件
 
-- `docker compose up -d` でStreamlit（8501）とOllama（11434）の両方にアクセスできる
-- `ollama-init` によりモデルが自動でダウンロードされ、手動の `ollama pull` が不要である
+- `docker compose up -d` でStreamlit（8501）にアクセスできる
+- コンテナから `http://host.docker.internal:11434` 経由でOllamaに接続できる
 
 ## フェーズ2: Streamlit UI基本画面
 
