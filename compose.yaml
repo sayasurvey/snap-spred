@@ -14,9 +14,16 @@ services:
     volumes:
       - ./credentials:/app/credentials:ro
       - ./app:/app/app:ro
+      - ./data:/app/data
     extra_hosts:
       # ホストマシン上のネイティブOllamaへアクセスするためのエントリ
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     deploy:
       resources:
         limits:

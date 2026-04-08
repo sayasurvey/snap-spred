@@ -16,8 +16,9 @@ class SheetsConnectionError(Exception):
     """スプレッドシートへの接続・認証エラー"""
 
 
-def _get_spreadsheet():
+def _get_spreadsheet(spreadsheet_id: str | None = None):
     """gspreadスプレッドシートオブジェクトを返す（共通処理）"""
+    _spreadsheet_id = spreadsheet_id or config.SPREADSHEET_ID
     try:
         creds = Credentials.from_service_account_file(
             config.GOOGLE_CREDENTIALS_PATH, scopes=_SCOPES
@@ -33,8 +34,8 @@ def _get_spreadsheet():
         )
 
     try:
-        client = gspread.authorize(creds)
-        return client.open_by_key(config.SPREADSHEET_ID)
+        client = gspread.Client(auth=creds)
+        return client.open_by_key(_spreadsheet_id)
     except gspread.exceptions.APIError as e:
         status = e.response.status_code if hasattr(e, "response") else "不明"
         raise SheetsConnectionError(
@@ -46,9 +47,9 @@ def _get_spreadsheet():
         )
 
 
-def _get_sheet(worksheet_title: str | None = None):
+def _get_sheet(worksheet_title: str | None = None, spreadsheet_id: str | None = None):
     """gspreadシートオブジェクトを返す（共通処理）"""
-    spreadsheet = _get_spreadsheet()
+    spreadsheet = _get_spreadsheet(spreadsheet_id)
     try:
         if worksheet_title:
             return spreadsheet.worksheet(worksheet_title)
@@ -59,7 +60,7 @@ def _get_sheet(worksheet_title: str | None = None):
         )
 
 
-def get_worksheet_titles() -> list[str]:
+def get_worksheet_titles(spreadsheet_id: str | None = None) -> list[str]:
     """
     スプレッドシートの全ワークシートのタイトル一覧を返す。
 
@@ -69,7 +70,7 @@ def get_worksheet_titles() -> list[str]:
     例外:
         SheetsConnectionError: 認証・接続エラー
     """
-    spreadsheet = _get_spreadsheet()
+    spreadsheet = _get_spreadsheet(spreadsheet_id)
     try:
         return [ws.title for ws in spreadsheet.worksheets()]
     except Exception as e:
@@ -78,12 +79,13 @@ def get_worksheet_titles() -> list[str]:
         )
 
 
-def get_first_row(worksheet_title: str | None = None) -> list[str]:
+def get_first_row(worksheet_title: str | None = None, spreadsheet_id: str | None = None) -> list[str]:
     """
     スプレッドシートの1行目（タイトル行）を取得する。
 
     引数:
         worksheet_title: ワークシート名（省略時は最初のシート）
+        spreadsheet_id: スプレッドシートID（省略時はconfig.pyのデフォルト）
 
     戻り値:
         ["商品名", "価格", "生産者", ...] — 空セルは空文字列
@@ -91,7 +93,7 @@ def get_first_row(worksheet_title: str | None = None) -> list[str]:
     例外:
         SheetsConnectionError: 認証・接続エラー
     """
-    sheet = _get_sheet(worksheet_title)
+    sheet = _get_sheet(worksheet_title, spreadsheet_id)
     try:
         return sheet.row_values(1)
     except Exception as e:
@@ -100,7 +102,7 @@ def get_first_row(worksheet_title: str | None = None) -> list[str]:
         )
 
 
-def insert_title_row(titles: list[str], worksheet_title: str | None = None) -> bool:
+def insert_title_row(titles: list[str], worksheet_title: str | None = None, spreadsheet_id: str | None = None) -> bool:
     """
     スプレッドシートの1行目にタイトル行を挿入する。
     既存のデータは2行目以降にシフトされる。
@@ -108,6 +110,7 @@ def insert_title_row(titles: list[str], worksheet_title: str | None = None) -> b
     引数:
         titles: タイトル文字列のリスト
         worksheet_title: ワークシート名（省略時は最初のシート）
+        spreadsheet_id: スプレッドシートID（省略時はconfig.pyのデフォルト）
 
     戻り値:
         True（成功時）
@@ -115,7 +118,7 @@ def insert_title_row(titles: list[str], worksheet_title: str | None = None) -> b
     例外:
         SheetsConnectionError: 認証・接続エラー
     """
-    sheet = _get_sheet(worksheet_title)
+    sheet = _get_sheet(worksheet_title, spreadsheet_id)
     try:
         sheet.insert_row(titles, index=1, value_input_option="USER_ENTERED")
     except gspread.exceptions.APIError as e:
@@ -134,13 +137,14 @@ def insert_title_row(titles: list[str], worksheet_title: str | None = None) -> b
     return True
 
 
-def append_to_sheet(row_data: list, worksheet_title: str | None = None) -> bool:
+def append_to_sheet(row_data: list, worksheet_title: str | None = None, spreadsheet_id: str | None = None) -> bool:
     """
     スプレッドシートの最終行にデータを追記する。
 
     引数:
         row_data: 列順のデータリスト
         worksheet_title: ワークシート名（省略時は最初のシート）
+        spreadsheet_id: スプレッドシートID（省略時はconfig.pyのデフォルト）
 
     戻り値:
         True（成功時）
@@ -148,7 +152,7 @@ def append_to_sheet(row_data: list, worksheet_title: str | None = None) -> bool:
     例外:
         SheetsConnectionError: 認証・接続エラー
     """
-    sheet = _get_sheet(worksheet_title)
+    sheet = _get_sheet(worksheet_title, spreadsheet_id)
     try:
         sheet.append_row(row_data, value_input_option="USER_ENTERED")
     except gspread.exceptions.APIError as e:
