@@ -33,7 +33,7 @@ _SYSTEM_PROMPT = """あなたは優秀なデータ入力アシスタントです
 8. 日本語テキストはそのまま日本語で出力すること"""
 
 
-def detect_document_tab(image_bytes: bytes, tab_names: list[str], model: str = None) -> str | None:
+def detect_document_tab(image_bytes: bytes, tab_names: list[str], model: str | None = None, read_timeout: int | None = None) -> str | None:
     """
     画像の帳票種類に最も一致するスプレッドシートのタブ名を返す。
 
@@ -81,11 +81,12 @@ def detect_document_tab(image_bytes: bytes, tab_names: list[str], model: str = N
         "options": {"temperature": 0.0},
     }
 
+    _read_timeout = read_timeout or config.OLLAMA_READ_TIMEOUT
     try:
         response = requests.post(
             f"{config.OLLAMA_BASE_URL}/api/chat",
             json=payload,
-            timeout=(config.OLLAMA_CONNECT_TIMEOUT, config.OLLAMA_READ_TIMEOUT),
+            timeout=(config.OLLAMA_CONNECT_TIMEOUT, _read_timeout),
         )
         response.raise_for_status()
     except requests.exceptions.ConnectionError:
@@ -106,14 +107,21 @@ def detect_document_tab(image_bytes: bytes, tab_names: list[str], model: str = N
 
     content = response.json()["message"]["content"]
 
-    # JSONパース
-    for pattern in [content.strip(), None]:
-        text = pattern if pattern is not None else re.search(r"\{.*\}", content, re.DOTALL)
-        if text is None:
-            break
-        raw = text if isinstance(text, str) else text.group()
+    # 1. そのままパース
+    try:
+        obj = json.loads(content.strip())
+        tab = obj.get("tab")
+        if tab in tab_names:
+            return tab
+        return None
+    except (json.JSONDecodeError, AttributeError):
+        pass
+
+    # 2. {...} ブロックを抽出して再試行
+    match = re.search(r"\{.*?\}", content, re.DOTALL)
+    if match:
         try:
-            obj = json.loads(raw)
+            obj = json.loads(match.group())
             tab = obj.get("tab")
             if tab in tab_names:
                 return tab
@@ -121,7 +129,7 @@ def detect_document_tab(image_bytes: bytes, tab_names: list[str], model: str = N
         except (json.JSONDecodeError, AttributeError):
             pass
 
-    # 最終フォールバック: タブ名がテキスト中に含まれているか探す
+    # 3. 最終フォールバック: タブ名がテキスト中に含まれているか探す
     for tab in tab_names:
         if tab in content:
             return tab
@@ -129,7 +137,7 @@ def detect_document_tab(image_bytes: bytes, tab_names: list[str], model: str = N
     return None
 
 
-def extract_data_freeform(image_bytes: bytes, model: str = None) -> tuple[list[dict], dict]:
+def extract_data_freeform(image_bytes: bytes, model: str | None = None, read_timeout: int | None = None) -> tuple[list[dict], dict]:
     """
     フォーマット未指定時のフリーフォーム抽出。
     LLMが画像から読み取れる主要な情報を自由に返す。
@@ -140,10 +148,10 @@ def extract_data_freeform(image_bytes: bytes, model: str = None) -> tuple[list[d
     例外:
         LLMConnectionError / LLMParseError
     """
-    return extract_data(image_bytes, fields=[], model=model)
+    return extract_data(image_bytes, fields=[], model=model, read_timeout=read_timeout)
 
 
-def extract_data(image_bytes: bytes, fields: list[str], model: str = None) -> tuple[list[dict], dict]:
+def extract_data(image_bytes: bytes, fields: list[str], model: str | None = None, read_timeout: int | None = None) -> tuple[list[dict], dict]:
     """
     画像からフィールドを抽出してJSON辞書のリストで返す。
     1つの書類に複数の明細行がある場合は複数要素のリストになる。
@@ -164,6 +172,7 @@ def extract_data(image_bytes: bytes, fields: list[str], model: str = None) -> tu
         LLMParseError: JSONパースが最終的に失敗した場合
     """
     model = model or config.OLLAMA_MODEL
+    _read_timeout = read_timeout or config.OLLAMA_READ_TIMEOUT
     resized = _resize_image(image_bytes)
     b64_image = base64.b64encode(resized).decode("utf-8")
 
@@ -187,7 +196,7 @@ def extract_data(image_bytes: bytes, fields: list[str], model: str = None) -> tu
             response = requests.post(
                 f"{config.OLLAMA_BASE_URL}/api/chat",
                 json=payload,
-                timeout=(config.OLLAMA_CONNECT_TIMEOUT, config.OLLAMA_READ_TIMEOUT),
+                timeout=(config.OLLAMA_CONNECT_TIMEOUT, _read_timeout),
             )
             response.raise_for_status()
         except requests.exceptions.ConnectionError:
@@ -283,7 +292,7 @@ def _extract_json_list(text: str) -> list[dict] | None:
         pass
 
     # 2. [...] ブロックを抽出して再試行
-    match = re.search(r"\[.*\]", text, re.DOTALL)
+    match = re.search(r"\[.*?\]", text, re.DOTALL)
     if match:
         try:
             result = _normalize(json.loads(match.group()))
@@ -293,7 +302,7 @@ def _extract_json_list(text: str) -> list[dict] | None:
             pass
 
     # 3. {...} ブロックを抽出して再試行（配列でない応答への対応）
-    match = re.search(r"\{.*\}", text, re.DOTALL)
+    match = re.search(r"\{.*?\}", text, re.DOTALL)
     if match:
         try:
             result = _normalize(json.loads(match.group()))
@@ -305,7 +314,7 @@ def _extract_json_list(text: str) -> list[dict] | None:
     return None
 
 
-def _resize_image(image_bytes: bytes, max_side: int = None) -> bytes:
+def _resize_image(image_bytes: bytes, max_side: int | None = None) -> bytes:
     """
     画像を長辺max_side px以内にリサイズしてJPEGバイト列で返す。
 
@@ -333,7 +342,7 @@ def _resize_image(image_bytes: bytes, max_side: int = None) -> bytes:
     w, h = img.size
     if max(w, h) > max_side:
         scale = max_side / max(w, h)
-        img = img.resize((int(w * scale), int(h * scale)), Image.BILINEAR)
+        img = img.resize((int(w * scale), int(h * scale)), Image.Resampling.BILINEAR)
 
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=config.IMAGE_JPEG_QUALITY)

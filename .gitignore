@@ -22,3 +22,7 @@ Thumbs.db
 .idea/
 
 *.log
+
+# ユーザー設定（ローカル保存）
+data/
+!data/.gitkeep

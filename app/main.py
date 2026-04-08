@@ -22,22 +22,22 @@ from app.sheets import append_to_sheet, insert_title_row, get_first_row, get_wor
 
 
 @st.cache_data(show_spinner=False)
-def _cached_extract_data(image_bytes: bytes, fields: tuple[str, ...]) -> tuple[list[dict], dict]:
-    """LLM抽出結果をメモリキャッシュ（同一画像×同一フィールドは再計算しない）"""
-    return extract_data(image_bytes, list(fields))
+def _cached_extract_data(image_bytes: bytes, fields: tuple[str, ...], model: str, read_timeout: int) -> tuple[list[dict], dict]:
+    """LLM抽出結果をメモリキャッシュ（同一画像×同一フィールド×同一モデルは再計算しない）"""
+    return extract_data(image_bytes, list(fields), model=model, read_timeout=read_timeout)
 
 
 @st.cache_data(show_spinner=False)
-def _cached_extract_freeform(image_bytes: bytes) -> tuple[list[dict], dict]:
+def _cached_extract_freeform(image_bytes: bytes, model: str, read_timeout: int) -> tuple[list[dict], dict]:
     """フリーフォームLLM抽出結果をメモリキャッシュ"""
-    return extract_data_freeform(image_bytes)
+    return extract_data_freeform(image_bytes, model=model, read_timeout=read_timeout)
 
 
 def _get_exif_datetime(image_bytes: bytes) -> datetime | None:
     """JPEG EXIFから撮影日時を取得する。取得できない場合はNoneを返す"""
     try:
         img = Image.open(io.BytesIO(image_bytes))
-        exif_data = img._getexif()  # type: ignore[attr-defined]
+        exif_data = img.getexif()
         if exif_data:
             # 36867: DateTimeOriginal / 306: DateTime
             dt_str = exif_data.get(36867) or exif_data.get(306)
@@ -58,6 +58,18 @@ def _idx_to_col(idx: int) -> str:
     return result
 
 
+def _save_current_settings() -> None:
+    """session_state の現在値をユーザー設定ファイルに保存する"""
+    config.save_user_settings({
+        "spreadsheet_id": st.session_state.get("cfg_spreadsheet_id", config.SPREADSHEET_ID),
+        "ollama_model": st.session_state.get("cfg_ollama_model", config.OLLAMA_MODEL),
+        "read_timeout": int(st.session_state.get("cfg_read_timeout", config.OLLAMA_READ_TIMEOUT)),
+        "max_workers": int(st.session_state.get("cfg_max_workers", config.LLM_MAX_WORKERS)),
+        "skip_preview": st.session_state.get("cfg_skip_preview", True),
+        "custom_presets": st.session_state.get("cfg_custom_presets", {}),
+    })
+
+
 # ページ設定（スマホ操作を優先したレイアウト）
 st.set_page_config(
     page_title="SnapSpread",
@@ -66,8 +78,81 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-st.title("📷 SnapSpread")
-st.caption("帳票を撮影してGoogleスプレッドシートに自動入力")
+# 初回のみ設定ファイルから読み込んでsession_stateを初期化
+if "_settings_loaded" not in st.session_state:
+    _saved = config.load_user_settings()
+    st.session_state["cfg_spreadsheet_id"] = _saved.get("spreadsheet_id", config.SPREADSHEET_ID)
+    st.session_state["cfg_ollama_model"] = _saved.get("ollama_model", config.OLLAMA_MODEL)
+    st.session_state["cfg_read_timeout"] = _saved.get("read_timeout", config.OLLAMA_READ_TIMEOUT)
+    st.session_state["cfg_max_workers"] = _saved.get("max_workers", config.LLM_MAX_WORKERS)
+    st.session_state["cfg_skip_preview"] = _saved.get("skip_preview", True)
+    st.session_state["cfg_custom_presets"] = _saved.get("custom_presets", {})
+    st.session_state["_settings_loaded"] = True
+
+_skip_preview: bool = st.session_state.get("cfg_skip_preview", True)
+
+# ───────────────────────────────────────
+# ヘッダー（タイトル + 右上の設定ボタン）
+# ───────────────────────────────────────
+_title_col, _gear_col = st.columns([9, 1])
+with _title_col:
+    st.title("📷 SnapSpread")
+    st.caption("帳票を撮影してGoogleスプレッドシートに自動入力")
+with _gear_col:
+    st.write("")
+    st.write("")
+    with st.popover("⚙️", use_container_width=True):
+        st.subheader("⚙️ 設定")
+
+        st.markdown("**LLMモデル**")
+        st.text_input("Ollamaモデル", key="cfg_ollama_model",
+                      help="例: qwen2.5vl:7b, llava:13b")
+        st.number_input("タイムアウト（秒）", min_value=30, max_value=3600, step=30,
+                        key="cfg_read_timeout",
+                        help="LLMの応答待ち最大時間。画像枚数が多い場合は大きくしてください")
+
+        st.markdown("**処理**")
+        st.slider("並列処理数", min_value=1, max_value=10, key="cfg_max_workers",
+                  help="同時に処理する画像数。多いほど高速ですがメモリを消費します")
+        st.checkbox("プレビューを省略して即スプレッドシートに書き込む",
+                    key="cfg_skip_preview",
+                    help="ONにすると抽出後すぐに書き込みます。OFFにすると確認ボタンが表示されます")
+
+        st.divider()
+
+        st.markdown("**プリセット管理**")
+        _custom_presets: dict = st.session_state.get("cfg_custom_presets", {})
+        if _custom_presets:
+            _del_preset = st.selectbox(
+                "削除するプリセット",
+                ["（選択してください）"] + list(_custom_presets.keys()),
+                key="preset_to_delete",
+            )
+            if st.button("選択したプリセットを削除", use_container_width=True):
+                if _del_preset != "（選択してください）":
+                    _custom_presets.pop(_del_preset, None)
+                    st.session_state["cfg_custom_presets"] = _custom_presets
+                    # ウィジェットのキーを削除することでrerun後にデフォルト値にリセットされる
+                    del st.session_state["preset_to_delete"]
+                    st.rerun()
+        else:
+            st.caption("カスタムプリセットはありません")
+
+        st.divider()
+
+        if st.button("💾 設定を保存", use_container_width=True, type="primary"):
+            _save_current_settings()
+            st.rerun()
+
+# ───────────────────────────────────────
+# スプレッドシートID入力
+# ───────────────────────────────────────
+st.text_input(
+    "スプレッドシートID",
+    key="cfg_spreadsheet_id",
+    placeholder="例: 1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms",
+    help="GoogleスプレッドシートのURL中のID（/d/〇〇/ の部分）",
+)
 
 # ───────────────────────────────────────
 # ① 画像アップロード（複数対応）
@@ -109,6 +194,42 @@ st.caption(
 
 if "format_text" not in st.session_state:
     st.session_state["format_text"] = ""
+
+# プリセット保存成功メッセージ
+if "_preset_saved_name" in st.session_state:
+    st.success(f"プリセット「{st.session_state.pop('_preset_saved_name')}」を保存しました")
+
+# プリセット選択
+_all_presets = {
+    "（なし）": "",
+    **config.DEFAULT_FORMAT_PRESETS,
+    **st.session_state.get("cfg_custom_presets", {}),
+}
+_preset_sel_col, _preset_apply_col, _preset_save_name_col, _preset_save_col = st.columns([3, 1, 2, 1])
+with _preset_sel_col:
+    _selected_preset = st.selectbox("プリセット", list(_all_presets.keys()),
+                                    label_visibility="collapsed", key="selected_preset")
+with _preset_apply_col:
+    if st.button("適用", use_container_width=True):
+        st.session_state["format_text"] = _all_presets[_selected_preset]
+        st.rerun()
+with _preset_save_name_col:
+    _preset_save_name = st.text_input("プリセット名", placeholder="名前を入力して保存",
+                                      label_visibility="collapsed", key="preset_save_name")
+with _preset_save_col:
+    if st.button("保存", use_container_width=True, key="btn_save_preset"):
+        _current_format = st.session_state.get("format_text", "").strip()
+        if not _preset_save_name:
+            st.warning("プリセット名を入力してください")
+        elif not _current_format:
+            st.warning("フォーマットを入力してからプリセットを保存してください")
+        else:
+            _custom = st.session_state.get("cfg_custom_presets", {})
+            _custom[_preset_save_name] = _current_format
+            st.session_state["cfg_custom_presets"] = _custom
+            _save_current_settings()
+            st.session_state["_preset_saved_name"] = _preset_save_name
+            st.rerun()
 
 # 列範囲ドロップダウンでテンプレートを生成
 _col_letters = [chr(65 + i) for i in range(26)]  # A〜Z
@@ -174,23 +295,77 @@ if sort_order == "列の値で並び替え" and _col_sort_candidates:
 st.subheader("④ 実行")
 run_button = st.button("📤 抽出してスプレッドシートに記録", use_container_width=True, type="primary")
 
+
+def _execute_write(state: dict) -> None:
+    """スプレッドシートへの書き込みを実行する（SheetsConnectionError を呼び出し元へスロー）"""
+    records = state["records"]
+    columns = state["columns"]
+    sorted_cols = state["sorted_cols"]
+    multi_tab_mode = state["multi_tab_mode"]
+    has_sheet_titles = state["has_sheet_titles"]
+    worksheet_titles = state["worksheet_titles"]
+    spreadsheet_id = state["spreadsheet_id"]
+
+    if multi_tab_mode:
+        tab_write_groups: dict[str, list] = {}
+        for r in records:
+            tab = r.get("target_tab") or worksheet_titles[0]
+            tab_write_groups.setdefault(tab, []).append(r)
+
+        for tab_name, tab_recs in tab_write_groups.items():
+            try:
+                tab_first_row = get_first_row(tab_name, spreadsheet_id)
+            except SheetsConnectionError:
+                tab_first_row = []
+            has_tab_titles = any(v.strip() for v in tab_first_row)
+
+            if not has_tab_titles:
+                fi = tab_recs[0].get("tab_format_info")
+                if fi:
+                    _tab_sorted = sorted(fi["columns"].keys(), key=lambda c: (len(c), c))
+                    title_row = [fi["columns"][col] for col in _tab_sorted]
+                else:
+                    dyn_cols = tab_recs[0].get("dynamic_columns", {})
+                    _dyn_sorted = sorted(dyn_cols.keys(), key=lambda c: (len(c), c))
+                    title_row = [dyn_cols[col] for col in _dyn_sorted]
+                if title_row:
+                    insert_title_row(title_row, tab_name, spreadsheet_id)
+                    st.info(f"**{tab_name}** にタイトル行を追加しました。")
+
+            for r in tab_recs:
+                append_to_sheet(r["row_data"], tab_name, spreadsheet_id)
+    else:
+        if not has_sheet_titles:
+            title_row = [columns[col] for col in sorted_cols]
+            insert_title_row(title_row, spreadsheet_id=spreadsheet_id)
+            st.info("タイトル行を追加しました:\n\n" + "  \n".join(title_row))
+
+        for r in records:
+            append_to_sheet(r["row_data"], spreadsheet_id=spreadsheet_id)
+
 if run_button:
     # ── 画像バリデーション ──
     if not valid_files:
         st.error("画像をアップロードしてください。")
         st.stop()
 
+    # セッションの設定値を取得
+    _spreadsheet_id: str = st.session_state.get("cfg_spreadsheet_id") or config.SPREADSHEET_ID
+    _ollama_model: str = st.session_state.get("cfg_ollama_model") or config.OLLAMA_MODEL
+    _read_timeout: int = int(st.session_state.get("cfg_read_timeout") or config.OLLAMA_READ_TIMEOUT)
+    _max_workers: int = int(st.session_state.get("cfg_max_workers") or config.LLM_MAX_WORKERS)
+
     # ── スプレッドシートのタブ情報を確認 ──
     with st.spinner("スプレッドシートの情報を確認中..."):
         try:
-            worksheet_titles = get_worksheet_titles()
+            worksheet_titles = get_worksheet_titles(_spreadsheet_id)
         except SheetsConnectionError as e:
             st.error(str(e))
             st.stop()
 
     # デフォルトシート（最初のタブ）のタイトル行を取得
     try:
-        sheet_first_row = get_first_row()
+        sheet_first_row = get_first_row(spreadsheet_id=_spreadsheet_id)
     except SheetsConnectionError as e:
         st.error(str(e))
         st.stop()
@@ -224,7 +399,7 @@ if run_button:
         with st.spinner("各タブのフォーマットを確認中..."):
             for tab_title in worksheet_titles:
                 try:
-                    first_row = get_first_row(tab_title)
+                    first_row = get_first_row(tab_title, _spreadsheet_id)
                     titles_in_tab = [(i, v) for i, v in enumerate(first_row) if v.strip()]
                     if titles_in_tab:
                         use_format_text = ", ".join(
@@ -311,26 +486,26 @@ if run_button:
 
         if multi_tab_mode:
             # タブ自動判定: LLMが画像の帳票種類と一致するタブを選択
-            target_tab = detect_document_tab(image_bytes, worksheet_titles)
+            target_tab = detect_document_tab(image_bytes, worksheet_titles, model=_ollama_model, read_timeout=_read_timeout)
             if target_tab and tab_formats.get(target_tab):
                 rec_format_info = tab_formats[target_tab]
                 llm_results, metrics = _cached_extract_data(
-                    image_bytes, tuple(rec_format_info["llm_fields"])
+                    image_bytes, tuple(rec_format_info["llm_fields"]), _ollama_model, _read_timeout
                 )
             else:
                 # タブ判定失敗 or タブにタイトル行なし → フリーフォーム
-                llm_results, metrics = _cached_extract_freeform(image_bytes)
+                llm_results, metrics = _cached_extract_freeform(image_bytes, _ollama_model, _read_timeout)
         elif freeform_mode:
-            llm_results, metrics = _cached_extract_freeform(image_bytes)
+            llm_results, metrics = _cached_extract_freeform(image_bytes, _ollama_model, _read_timeout)
         else:
-            llm_results, metrics = _cached_extract_data(image_bytes, tuple(llm_fields))
+            llm_results, metrics = _cached_extract_data(image_bytes, tuple(llm_fields), _ollama_model, _read_timeout)
 
         return file_name, exif_dt, llm_results, metrics, target_tab, rec_format_info
 
     completed_count = 0
     errors: list[str] = []
 
-    with ThreadPoolExecutor(max_workers=config.LLM_MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=_max_workers) as executor:
         future_to_name = {
             executor.submit(_process_one, name, data): name
             for name, data in file_data
@@ -453,14 +628,48 @@ if run_button:
 
             records.sort(key=_col_sort_key)
 
-    # ── 抽出結果プレビュー ──
+    # ── 抽出結果をsession_stateに保存（プレビュー確認フロー用）──
+    _write_state = {
+        "records": records,
+        "columns": columns if not multi_tab_mode else {},
+        "sorted_cols": sorted_cols if not multi_tab_mode else [],
+        "multi_tab_mode": multi_tab_mode,
+        "has_sheet_titles": has_sheet_titles,
+        "worksheet_titles": worksheet_titles,
+        "spreadsheet_id": _spreadsheet_id,
+    }
+
+    if _skip_preview:
+        # プレビューをスキップして即時書き込み
+        with st.spinner(f"スプレッドシートに {len(records)} 行を書き込み中..."):
+            try:
+                _execute_write(_write_state)
+                st.success(f"{len(records)} 件をスプレッドシートへ追記しました！")
+            except SheetsConnectionError as e:
+                st.error(str(e))
+    else:
+        st.session_state["_pending_write"] = _write_state
+
+# ───────────────────────────────────────
+# ⑤ 抽出結果プレビュー＆書き込み確認
+# ───────────────────────────────────────
+if "write_success_msg" in st.session_state:
+    st.success(st.session_state.pop("write_success_msg"))
+
+if "_pending_write" in st.session_state:
+    _pw = st.session_state["_pending_write"]
+    _pw_records: list = _pw["records"]
+    _pw_columns: dict = _pw["columns"]
+    _pw_sorted_cols: list = _pw["sorted_cols"]
+    _pw_multi_tab: bool = _pw["multi_tab_mode"]
+    _pw_ws_titles: list = _pw["worksheet_titles"]
+
     st.subheader("⑤ 抽出結果")
 
-    if multi_tab_mode:
-        # タブ別にグループ化して表示
+    if _pw_multi_tab:
         tab_preview_groups: dict[str, list] = {}
-        for r in records:
-            tab = r.get("target_tab") or worksheet_titles[0]
+        for r in _pw_records:
+            tab = r.get("target_tab") or _pw_ws_titles[0]
             tab_preview_groups.setdefault(tab, []).append(r)
 
         for tab_name, tab_recs in tab_preview_groups.items():
@@ -480,57 +689,27 @@ if run_button:
                     preview_rows.append(row)
                 st.dataframe(preview_rows, use_container_width=True)
     else:
-        headers = [f"{col}列 ({columns[col]})" for col in sorted_cols]
+        headers = [f"{col}列 ({_pw_columns[col]})" for col in _pw_sorted_cols]
         preview_rows = []
-        for r in records:
+        for r in _pw_records:
             row = dict(zip(headers, r["row_data"]))
             row["画像ファイル"] = r["file_name"]
             preview_rows.append(row)
         st.dataframe(preview_rows, use_container_width=True)
 
-    # ── スプレッドシートへの書き込み ──
-    with st.spinner(f"スプレッドシートに {len(records)} 行を書き込み中..."):
-        try:
-            if multi_tab_mode:
-                # タブ別にグループ化して書き込み
-                tab_write_groups: dict[str, list] = {}
-                for r in records:
-                    tab = r.get("target_tab") or worksheet_titles[0]
-                    tab_write_groups.setdefault(tab, []).append(r)
-
-                for tab_name, tab_recs in tab_write_groups.items():
-                    # タブのタイトル行が空の場合は挿入
-                    try:
-                        tab_first_row = get_first_row(tab_name)
-                    except SheetsConnectionError:
-                        tab_first_row = []
-                    has_tab_titles = any(v.strip() for v in tab_first_row)
-
-                    if not has_tab_titles:
-                        fi = tab_recs[0].get("tab_format_info")
-                        if fi:
-                            tab_sorted_cols = sorted(fi["columns"].keys(), key=lambda c: (len(c), c))
-                            title_row = [fi["columns"][col] for col in tab_sorted_cols]
-                        else:
-                            dyn_cols = tab_recs[0].get("dynamic_columns", {})
-                            dyn_sorted_cols = sorted(dyn_cols.keys(), key=lambda c: (len(c), c))
-                            title_row = [dyn_cols[col] for col in dyn_sorted_cols]
-                        if title_row:
-                            insert_title_row(title_row, tab_name)
-                            st.info(f"**{tab_name}** にタイトル行を追加しました。")
-
-                    for r in tab_recs:
-                        append_to_sheet(r["row_data"], tab_name)
-            else:
-                # タイトル行がなかった場合は先頭に挿入
-                if not has_sheet_titles:
-                    title_row = [columns[col] for col in sorted_cols]
-                    insert_title_row(title_row)
-                    st.info("タイトル行を追加しました:\n\n" + "  \n".join(title_row))
-
-                for r in records:
-                    append_to_sheet(r["row_data"])
-
-            st.success(f"{len(records)} 件をスプレッドシートへ追記しました！")
-        except SheetsConnectionError as e:
-            st.error(str(e))
+    _confirm_col, _cancel_col = st.columns(2)
+    with _confirm_col:
+        if st.button("✅ スプレッドシートに書き込む", type="primary", use_container_width=True):
+            with st.spinner(f"スプレッドシートに {len(_pw_records)} 行を書き込み中..."):
+                try:
+                    _execute_write(_pw)
+                    _n = len(_pw_records)
+                    del st.session_state["_pending_write"]
+                    st.session_state["write_success_msg"] = f"{_n} 件をスプレッドシートへ追記しました！"
+                    st.rerun()
+                except SheetsConnectionError as e:
+                    st.error(str(e))
+    with _cancel_col:
+        if st.button("❌ 結果を破棄", use_container_width=True):
+            del st.session_state["_pending_write"]
+            st.rerun()
