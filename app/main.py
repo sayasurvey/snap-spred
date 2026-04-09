@@ -15,10 +15,23 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import psutil
 
+import re
+
 from app import config
 from app.parser import parse_format, build_row
 from app.llm import extract_data, extract_data_freeform, detect_document_tab, LLMConnectionError, LLMParseError
 from app.sheets import append_to_sheet, insert_title_row, get_first_row, get_worksheet_titles, SheetsConnectionError
+
+
+def _extract_spreadsheet_id(url_or_id: str) -> str:
+    """スプレッドシートのURLまたはIDからIDを抽出する。
+    URLの場合は /d/<ID>/ の部分を、IDのみの場合はそのまま返す。
+    """
+    url_or_id = url_or_id.strip()
+    match = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", url_or_id)
+    if match:
+        return match.group(1)
+    return url_or_id
 
 
 @st.cache_data(show_spinner=False)
@@ -145,13 +158,13 @@ with _gear_col:
             st.rerun()
 
 # ───────────────────────────────────────
-# スプレッドシートID入力
+# スプレッドシートURL入力
 # ───────────────────────────────────────
 st.text_input(
-    "スプレッドシートID",
+    "スプレッドシートURL",
     key="cfg_spreadsheet_id",
-    placeholder="例: 1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms",
-    help="GoogleスプレッドシートのURL中のID（/d/〇〇/ の部分）",
+    placeholder="例: https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms/edit",
+    help="GoogleスプレッドシートのURLを貼り付けてください（IDのみの入力も可）",
 )
 
 # ───────────────────────────────────────
@@ -350,7 +363,9 @@ if run_button:
         st.stop()
 
     # セッションの設定値を取得
-    _spreadsheet_id: str = st.session_state.get("cfg_spreadsheet_id") or config.SPREADSHEET_ID
+    _spreadsheet_id: str = _extract_spreadsheet_id(
+        st.session_state.get("cfg_spreadsheet_id") or config.SPREADSHEET_ID
+    )
     _ollama_model: str = st.session_state.get("cfg_ollama_model") or config.OLLAMA_MODEL
     _read_timeout: int = int(st.session_state.get("cfg_read_timeout") or config.OLLAMA_READ_TIMEOUT)
     _max_workers: int = int(st.session_state.get("cfg_max_workers") or config.LLM_MAX_WORKERS)
